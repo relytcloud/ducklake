@@ -179,7 +179,7 @@ unique_ptr<LocalSinkState> DuckLakeMergeInsert::GetLocalSinkState(ExecutionConte
 	}
 	result->cast_chunk.Initialize(context.client, copy.Cast<PhysicalCopyToFile>().expected_types);
 
-	return result;
+	return std::move(result);
 }
 
 //===--------------------------------------------------------------------===//
