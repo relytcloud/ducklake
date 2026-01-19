@@ -79,7 +79,27 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTable(CatalogTransaction t
 	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &base_info = info.Base();
 	auto table_uuid = duck_transaction.GenerateUUID();
-	auto table_data_path = DataPath() + duck_catalog.GeneratePathFromName(table_uuid, base_info.table);
+
+	// Check for custom path from PostgreSQL GUC via DuckDB extension option
+	std::string base_path;
+	auto &context = transaction.GetContext();
+	duckdb::Value custom_path_value;
+
+	if (context.TryGetCurrentSetting("ducklake_default_table_path", custom_path_value) &&
+	    !custom_path_value.IsNull() && !custom_path_value.ToString().empty()) {
+		base_path = custom_path_value.ToString();
+		// Ensure trailing slash for proper path concatenation
+		if (!base_path.empty() && base_path.back() != '/') {
+			base_path += '/';
+		}
+		// Add schema directory to custom path to match default behavior
+		// Use "main" as the default schema name for DuckDB
+		base_path += "main/";
+	} else {
+		base_path = DataPath();
+	}
+
+	auto table_data_path = base_path + duck_catalog.GeneratePathFromName(table_uuid, base_info.table);
 	return CreateTableExtended(transaction, info, std::move(table_uuid), std::move(table_data_path));
 }
 
