@@ -18,8 +18,9 @@ DuckLakeSchemaEntry::DuckLakeSchemaEntry(Catalog &catalog, CreateSchemaInfo &inf
       data_path(std::move(data_path_p)) {
 }
 
-bool DuckLakeSchemaEntry::HandleCreateConflict(CatalogTransaction transaction, CatalogType catalog_type,
-                                               const string &entry_name, OnCreateConflict on_conflict) {
+bool
+DuckLakeSchemaEntry::HandleCreateConflict(CatalogTransaction transaction, CatalogType catalog_type,
+                                          const string &entry_name, OnCreateConflict on_conflict) {
 	auto existing_entry = GetEntry(transaction, catalog_type, entry_name);
 	if (!existing_entry) {
 		// no conflict
@@ -50,9 +51,9 @@ bool DuckLakeSchemaEntry::HandleCreateConflict(CatalogTransaction transaction, C
 	return true;
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTransaction transaction,
-                                                                    BoundCreateTableInfo &info, string table_uuid,
-                                                                    string table_data_path) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateTableExtended(CatalogTransaction transaction, BoundCreateTableInfo &info, string table_uuid,
+                                         string table_data_path) {
 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
 	auto &base_info = info.Base();
 	// check if we have an existing entry with this name
@@ -73,28 +74,26 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableExtended(CatalogTrans
 	return result;
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTable(CatalogTransaction transaction,
-                                                            BoundCreateTableInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto &duck_transaction = transaction.transaction->Cast<DuckLakeTransaction>();
 	auto &duck_catalog = catalog.Cast<DuckLakeCatalog>();
 	auto &base_info = info.Base();
 	auto table_uuid = duck_transaction.GenerateUUID();
 
 	// Check for custom path from PostgreSQL GUC via DuckDB extension option
-	std::string base_path;
+	string base_path;
 	auto &context = transaction.GetContext();
-	duckdb::Value custom_path_value;
+	Value table_path_value;
 
-	if (context.TryGetCurrentSetting("ducklake_default_table_path", custom_path_value) &&
-	    !custom_path_value.IsNull() && !custom_path_value.ToString().empty()) {
-		base_path = custom_path_value.ToString();
+	if (context.TryGetCurrentSetting("ducklake_default_table_path", table_path_value) && !table_path_value.IsNull() &&
+	    !table_path_value.ToString().empty()) {
+		base_path = table_path_value.ToString();
 		// Ensure trailing slash for proper path concatenation
-		if (!base_path.empty() && base_path.back() != '/') {
-			base_path += '/';
+		if (!StringUtil::EndsWith(base_path, duck_catalog.Separator())) {
+			base_path += duck_catalog.Separator();
 		}
-		// Add schema directory to custom path to match default behavior
-		// Use "main" as the default schema name for DuckDB
-		base_path += "main/";
+		base_path += duck_catalog.GeneratePathFromName(schema_uuid, name);
 	} else {
 		base_path = DataPath();
 	}
@@ -103,7 +102,8 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTable(CatalogTransaction t
 	return CreateTableExtended(transaction, info, std::move(table_uuid), std::move(table_data_path));
 }
 
-bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
+bool
+DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 	switch (type) {
 	case CatalogType::TABLE_ENTRY:
 	case CatalogType::VIEW_ENTRY:
@@ -113,17 +113,18 @@ bool DuckLakeSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 	}
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateFunction(CatalogTransaction transaction,
-                                                               CreateFunctionInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateFunction(CatalogTransaction transaction, CreateFunctionInfo &info) {
 	throw NotImplementedException("DuckLake does not support functions");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info,
-                                                            TableCatalogEntry &table) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info, TableCatalogEntry &table) {
 	throw NotImplementedException("DuckLake does not support indexes");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
 	// check if we have an existing entry with this name
 	if (!HandleCreateConflict(transaction, CatalogType::VIEW_ENTRY, info.view_name, info.on_conflict)) {
 		return nullptr;
@@ -140,36 +141,38 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateView(CatalogTransaction tr
 	return result;
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateSequence(CatalogTransaction transaction,
-                                                               CreateSequenceInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateSequence(CatalogTransaction transaction, CreateSequenceInfo &info) {
 	throw NotImplementedException("DuckLake does not support sequences");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateTableFunction(CatalogTransaction transaction,
-                                                                    CreateTableFunctionInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateTableFunction(CatalogTransaction transaction, CreateTableFunctionInfo &info) {
 	throw NotImplementedException("DuckLake does not support table functions");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateCopyFunction(CatalogTransaction transaction,
-                                                                   CreateCopyFunctionInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateCopyFunction(CatalogTransaction transaction, CreateCopyFunctionInfo &info) {
 	throw NotImplementedException("DuckLake does not support copy functions");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreatePragmaFunction(CatalogTransaction transaction,
-                                                                     CreatePragmaFunctionInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreatePragmaFunction(CatalogTransaction transaction, CreatePragmaFunctionInfo &info) {
 	throw NotImplementedException("DuckLake does not support pragma functions");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateCollation(CatalogTransaction transaction,
-                                                                CreateCollationInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateCollation(CatalogTransaction transaction, CreateCollationInfo &info) {
 	throw NotImplementedException("DuckLake does not support collations");
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::CreateType(CatalogTransaction transaction, CreateTypeInfo &info) {
 	throw NotImplementedException("DuckLake does not support user-defined types");
 }
 
-void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInfo &info) {
+void
+DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInfo &info) {
 	auto &context = catalog_transaction.GetContext();
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 	switch (info.type) {
@@ -254,8 +257,9 @@ void DuckLakeSchemaEntry::Alter(CatalogTransaction catalog_transaction, AlterInf
 	}
 }
 
-void DuckLakeSchemaEntry::Scan(ClientContext &context, CatalogType type,
-                               const std::function<void(CatalogEntry &)> &callback) {
+void
+DuckLakeSchemaEntry::Scan(ClientContext &context, CatalogType type,
+                          const std::function<void(CatalogEntry &)> &callback) {
 	if (!CatalogTypeIsSupported(type)) {
 		return;
 	}
@@ -291,14 +295,16 @@ void DuckLakeSchemaEntry::Scan(ClientContext &context, CatalogType type,
 	}
 }
 
-void DuckLakeSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
+void
+DuckLakeSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	auto &catalog_set = GetCatalogSet(type);
 	for (auto &entry : catalog_set.GetEntries()) {
 		callback(*entry.second);
 	}
 }
 
-void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
+void
+DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	if (info.cascade) {
 		throw NotImplementedException("Cascade Drop not supported in DuckLake");
 	}
@@ -317,8 +323,8 @@ void DuckLakeSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	transaction.DropEntry(*catalog_entry);
 }
 
-optional_ptr<CatalogEntry> DuckLakeSchemaEntry::LookupEntry(CatalogTransaction transaction,
-                                                            const EntryLookupInfo &lookup_info) {
+optional_ptr<CatalogEntry>
+DuckLakeSchemaEntry::LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) {
 	auto catalog_type = lookup_info.GetCatalogType();
 	auto &entry_name = lookup_info.GetEntryName();
 	if (catalog_type == CatalogType::TABLE_FUNCTION_ENTRY) {
@@ -347,12 +353,14 @@ optional_ptr<CatalogEntry> DuckLakeSchemaEntry::LookupEntry(CatalogTransaction t
 	return *entry;
 }
 
-void DuckLakeSchemaEntry::AddEntry(CatalogType type, unique_ptr<CatalogEntry> entry) {
+void
+DuckLakeSchemaEntry::AddEntry(CatalogType type, unique_ptr<CatalogEntry> entry) {
 	auto &catalog_set = GetCatalogSet(type);
 	catalog_set.CreateEntry(std::move(entry));
 }
 
-void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool cascade) {
+void
+DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool cascade) {
 	if (!cascade) {
 		// get a list of all dependents
 		vector<reference<CatalogEntry>> dependents;
@@ -400,7 +408,8 @@ void DuckLakeSchemaEntry::TryDropSchema(DuckLakeTransaction &transaction, bool c
 	}
 }
 
-DuckLakeCatalogSet &DuckLakeSchemaEntry::GetCatalogSet(CatalogType type) {
+DuckLakeCatalogSet &
+DuckLakeSchemaEntry::GetCatalogSet(CatalogType type) {
 	switch (type) {
 	case CatalogType::TABLE_ENTRY:
 	case CatalogType::VIEW_ENTRY:
