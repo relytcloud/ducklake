@@ -58,7 +58,7 @@ static unique_ptr<FunctionData> DuckLakeExpireSnapshotsBind(ClientContext &conte
 	filter = "snapshot_id != (SELECT MAX(snapshot_id) FROM {METADATA_CATALOG}.ducklake_snapshot) AND ";
 	if (has_timestamp) {
 		auto ts = Timestamp::ToString(timestamp_t(from_timestamp.value));
-		filter += StringUtil::Format("snapshot_time < '%s'", ts);
+		filter += StringUtil::Format("snapshot_time < '%s UTC'", ts);
 	} else if (!has_versions && !older_than_default.empty()) {
 		filter += StringUtil::Format("snapshot_time < NOW() - INTERVAL '%s'", older_than_default);
 	} else {
