@@ -123,6 +123,8 @@ public:
 	virtual unique_ptr<QueryResult> Execute(string query);
 	//! Directly execute on metadata
 	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string query);
+	//! Execute the metadata commit batch — may be overridden to add retry/conflict handling
+	virtual unique_ptr<QueryResult> ExecuteCommit(DuckLakeSnapshot snapshot, string query);
 
 	//! Directly query on metadata
 	virtual unique_ptr<QueryResult> Query(string query);

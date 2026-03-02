@@ -1633,6 +1633,10 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapsh
 	return Execute(std::move(query));
 }
 
+unique_ptr<QueryResult> DuckLakeMetadataManager::ExecuteCommit(DuckLakeSnapshot snapshot, string query) {
+	return Execute(snapshot, std::move(query));
+}
+
 unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string query) {
 	auto &ducklake_catalog = transaction.GetCatalog();
 	FillCatalogArgs(query, ducklake_catalog);

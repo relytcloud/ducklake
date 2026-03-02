@@ -1467,7 +1467,7 @@ void DuckLakeTransaction::FlushChanges() {
 				batch_queries += metadata_manager->InsertNewSchema(commit_snapshot);
 			}
 
-			auto res = metadata_manager->Execute(commit_snapshot, batch_queries);
+			auto res = metadata_manager->ExecuteCommit(commit_snapshot, batch_queries);
 			if (res->HasError()) {
 				res->GetErrorObject().Throw("Failed to flush changes into DuckLake: ");
 			}
@@ -1481,9 +1481,10 @@ void DuckLakeTransaction::FlushChanges() {
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			// rollback if there is an active transaction
-			auto has_active_transaction = connection->context->transaction.HasActiveTransaction();
-			if (has_active_transaction) {
-				connection->Rollback();
+			if (connection) {
+				if (connection->context->transaction.HasActiveTransaction()) {
+					connection->Rollback();
+				}
 			}
 			bool retry_on_error = RetryOnError(error.Message());
 			bool finished_retrying = i + 1 >= max_retry_count;
@@ -1512,7 +1513,9 @@ void DuckLakeTransaction::FlushChanges() {
 #endif
 
 			// retry the transaction (with a new snapshot id)
-			connection->BeginTransaction();
+			if (connection) {
+				connection->BeginTransaction();
+			}
 			snapshot.reset();
 		}
 	}
