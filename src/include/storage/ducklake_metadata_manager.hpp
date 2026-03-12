@@ -15,6 +15,7 @@
 #include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "common/ducklake_snapshot.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -121,9 +122,14 @@ public:
 
 	DuckLakeMetadataManager &Get(DuckLakeTransaction &transaction);
 
+	virtual bool IsInitialized(DuckLakeOptions &options);
 	//! Initialize a new DuckLake
 	virtual void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption);
 	virtual DuckLakeMetadata LoadDuckLake();
+
+	static void FillSnapshotArgs(string &query, const DuckLakeSnapshot &snapshot);
+	static void FillSnapshotCommitArgs(string &query, const DuckLakeSnapshotCommit &commit_info);
+	static void FillCatalogArgs(string &query, const DuckLakeCatalog &ducklake_catalog);
 
 	//! Execute on metadata (no snapshot replacement)
 	virtual unique_ptr<QueryResult> Execute(string query);
@@ -213,7 +219,7 @@ public:
 	virtual string UpdateGlobalTableStats(const DuckLakeGlobalStatsInfo &stats);
 	virtual SnapshotChangeInfo GetSnapshotAndStatsAndChanges(DuckLakeSnapshot start_snapshot,
 	                                                         SnapshotAndStats &current_snapshot);
-	SnapshotDeletedFromFiles GetFilesDeletedOrDroppedAfterSnapshot(const DuckLakeSnapshot &start_snapshot) const;
+	SnapshotDeletedFromFiles GetFilesDeletedOrDroppedAfterSnapshot(const DuckLakeSnapshot &start_snapshot);
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot();
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot(BoundAtClause &at_clause, SnapshotBound bound);
 	virtual idx_t GetNextColumnId(TableIndex table_id);
@@ -247,8 +253,7 @@ public:
 	virtual void MigrateV01();
 	virtual void MigrateV02(bool allow_failures = false);
 	virtual void MigrateV03(bool allow_failures = false);
-	virtual void ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
-	                              const string &to_version);
+	virtual void ExecuteMigration(string migrate_query, bool allow_failures);
 
 	string LoadPath(string path);
 	string StorePath(string path);

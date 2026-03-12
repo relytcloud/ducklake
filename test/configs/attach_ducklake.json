@@ -636,7 +636,8 @@
             "test/sql/types/geo/geometry_crs.test",
             "test/sql/types/geo/geometry_shred.test"
         ]
-    },
+    }
+    ,
     {
       "reason": "FIXME: Variant Bugs?",
       "paths": [

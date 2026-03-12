@@ -1,4 +1,5 @@
 #include "storage/ducklake_metadata_manager.hpp"
+#include "common/ducklake_options.hpp"
 #include "storage/ducklake_transaction.hpp"
 #include "storage/ducklake_variant_stats.hpp"
 #include "common/ducklake_util.hpp"
@@ -118,6 +119,66 @@ string DuckLakeMetadataManager::ListAggregation(const vector<pair<string, string
 	return "LIST({" + fields_part + "})";
 }
 
+static string GetAttachOptions(const DuckLakeOptions &options) {
+	vector<string> attach_options;
+	if (options.access_mode != AccessMode::AUTOMATIC) {
+		switch (options.access_mode) {
+		case AccessMode::READ_ONLY:
+			attach_options.push_back("READ_ONLY");
+			break;
+		case AccessMode::READ_WRITE:
+			attach_options.push_back("READ_WRITE");
+			break;
+		default:
+			throw InternalException("Unsupported access mode in DuckLake attach");
+		}
+	}
+	for (auto &option : options.metadata_parameters) {
+		attach_options.push_back(option.first + " " + option.second.ToSQLString());
+	}
+
+	if (attach_options.empty()) {
+		return string();
+	}
+	string result;
+	for (auto &option : attach_options) {
+		if (!result.empty()) {
+			result += ", ";
+		}
+		result += option;
+	}
+	return " (" + result + ")";
+}
+
+bool DuckLakeMetadataManager::IsInitialized(DuckLakeOptions &options) {
+	auto &catalog = transaction.GetCatalog();
+	// attach the metadata database
+	auto result =
+	    transaction.Query("ATTACH {METADATA_PATH} AS {METADATA_CATALOG_NAME_IDENTIFIER}" + GetAttachOptions(options));
+	if (result->HasError()) {
+		auto &error_obj = result->GetErrorObject();
+		error_obj.Throw("Failed to attach DuckLake MetaData \"" + catalog.MetadataDatabaseName() + "\" at path + \"" +
+		                catalog.MetadataPath() + "\"");
+	}
+	// explicitly load all secrets - work-around to secret initialization bug
+	transaction.Query("FROM duckdb_secrets()");
+
+	if (options.metadata_schema.empty()) {
+		// if the schema is not explicitly set by the user - set it to the default schema in the catalog
+		options.metadata_schema = transaction.GetDefaultSchemaName();
+	}
+
+	result = transaction.Query(
+	    "SELECT COUNT(*) FROM duckdb_tables() WHERE database_name={METADATA_CATALOG_NAME_LITERAL} AND "
+	    "schema_name={METADATA_SCHEMA_NAME_LITERAL} AND table_name LIKE 'ducklake_%'");
+	if (result->HasError()) {
+		auto &error_obj = result->GetErrorObject();
+		error_obj.Throw("Failed to load DuckLake table data");
+	}
+	auto count = result->Fetch()->GetValue(0, 0).GetValue<idx_t>();
+	return count > 0;
+}
+
 void DuckLakeMetadataManager::InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption) {
 	string initialize_query;
 	if (has_explicit_schema) {
@@ -129,6 +190,7 @@ void DuckLakeMetadataManager::InitializeDuckLake(bool has_explicit_schema, DuckL
 	auto &base_data_path = ducklake_catalog.DataPath();
 	string data_path = StorePath(base_data_path);
 	string encryption_str = encryption == DuckLakeEncryption::ENCRYPTED ? "true" : "false";
+	string initial_schema_uuid = transaction.GenerateUUID();
 	initialize_query += StringUtil::Format(R"(
 CREATE TABLE {METADATA_CATALOG}.ducklake_metadata(key VARCHAR NOT NULL, value VARCHAR NOT NULL, scope VARCHAR, scope_id BIGINT);
 CREATE TABLE {METADATA_CATALOG}.ducklake_snapshot(snapshot_id BIGINT PRIMARY KEY, snapshot_time TIMESTAMPTZ, schema_version BIGINT, next_catalog_id BIGINT, next_file_id BIGINT);
@@ -161,9 +223,9 @@ CREATE TABLE {METADATA_CATALOG}.ducklake_sort_expression(sort_id BIGINT, table_i
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot VALUES (0, NOW(), 0, 1, 0);
 INSERT INTO {METADATA_CATALOG}.ducklake_snapshot_changes VALUES (0, 'created_schema:"main"',  NULL, NULL, NULL);
 INSERT INTO {METADATA_CATALOG}.ducklake_metadata (key, value) VALUES ('version', '0.4'), ('created_by', 'DuckDB %s'), ('data_path', %s), ('encrypted', '%s');
-INSERT INTO {METADATA_CATALOG}.ducklake_schema VALUES (0, UUID(), 0, NULL, 'main', 'main/', true);
+INSERT INTO {METADATA_CATALOG}.ducklake_schema VALUES (0, '%s'::UUID, 0, NULL, 'main', 'main/', true);
 	)",
-	                                       DuckDB::SourceID(), SQLString(data_path), encryption_str);
+	                                       DuckDB::SourceID(), SQLString(data_path), encryption_str, initial_schema_uuid);
 	auto result = Execute(initialize_query);
 	if (result->HasError()) {
 		result->GetErrorObject().Throw("Failed to initialize DuckLake: ");
@@ -190,8 +252,7 @@ UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '0.2' WHERE key = 'versi
 	}
 }
 
-void DuckLakeMetadataManager::ExecuteMigration(string migrate_query, bool allow_failures, const string &from_version,
-                                               const string &to_version) {
+void DuckLakeMetadataManager::ExecuteMigration(string migrate_query, bool allow_failures) {
 	if (allow_failures) {
 		migrate_query = StringUtil::Replace(migrate_query, "{IF_NOT_EXISTS}", "IF NOT EXISTS");
 		migrate_query = StringUtil::Replace(migrate_query, "{IF_EXISTS}", "IF EXISTS");
@@ -206,7 +267,7 @@ void DuckLakeMetadataManager::ExecuteMigration(string migrate_query, bool allow_
 	}
 	auto result = Execute(migrate_query);
 	if (result->HasError()) {
-		result->GetErrorObject().Throw("Failed to migrate DuckLake from v" + from_version + " to v" + to_version + ":");
+		result->GetErrorObject().Throw("Failed to migrate DuckLake from v0.2 to v0.3: ");
 	}
 }
 
@@ -223,7 +284,7 @@ ALTER TABLE {IF_EXISTS} {METADATA_CATALOG}.ducklake_file_column_statistics RENAM
 ALTER TABLE {METADATA_CATALOG}.ducklake_file_column_stats ADD COLUMN {IF_NOT_EXISTS} extra_stats VARCHAR DEFAULT NULL;
 ALTER TABLE {METADATA_CATALOG}.ducklake_table_column_stats ADD COLUMN {IF_NOT_EXISTS} extra_stats VARCHAR DEFAULT NULL;
 	)";
-	ExecuteMigration(migrate_query, allow_failures, "0.2", "0.3");
+	ExecuteMigration(migrate_query, allow_failures);
 }
 
 void DuckLakeMetadataManager::MigrateV03(bool allow_failures) {
@@ -251,7 +312,7 @@ WHERE df.data_file_id = m.data_file_id;
 DROP TABLE IF EXISTS __ducklake_partial_max_migration;
 UPDATE {METADATA_CATALOG}.ducklake_metadata SET value = '0.4' WHERE key = 'version';
 	)";
-	ExecuteMigration(migrate_query, allow_failures, "0.3", "0.4");
+	ExecuteMigration(migrate_query, allow_failures);
 
 	auto migrate_schema_versions = Execute(R"(
 INSERT INTO {METADATA_CATALOG}.ducklake_schema_versions (table_id, begin_snapshot, schema_version)
@@ -1928,12 +1989,50 @@ string DuckLakeMetadataManager::DropViews(const set<TableIndex> &ids) {
 	return FlushDrop("ducklake_view", "view_id", ids);
 }
 
+void DuckLakeMetadataManager::FillSnapshotArgs(string &query, const DuckLakeSnapshot &snapshot) {
+	query = StringUtil::Replace(query, "{SNAPSHOT_ID}", to_string(snapshot.snapshot_id));
+	query = StringUtil::Replace(query, "{SCHEMA_VERSION}", to_string(snapshot.schema_version));
+	query = StringUtil::Replace(query, "{NEXT_CATALOG_ID}", to_string(snapshot.next_catalog_id));
+	query = StringUtil::Replace(query, "{NEXT_FILE_ID}", to_string(snapshot.next_file_id));
+}
+
+void DuckLakeMetadataManager::FillSnapshotCommitArgs(string &query, const DuckLakeSnapshotCommit &commit_info) {
+	query = StringUtil::Replace(query, "{AUTHOR}", commit_info.author.ToSQLString());
+	query = StringUtil::Replace(query, "{COMMIT_MESSAGE}", commit_info.commit_message.ToSQLString());
+	query = StringUtil::Replace(query, "{COMMIT_EXTRA_INFO}", commit_info.commit_extra_info.ToSQLString());
+}
+
+void DuckLakeMetadataManager::FillCatalogArgs(string &query, const DuckLakeCatalog &ducklake_catalog) {
+	auto catalog_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataDatabaseName());
+	auto catalog_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataDatabaseName());
+	auto schema_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataSchemaName());
+	auto schema_identifier_escaped = StringUtil::Replace(schema_identifier, "'", "''");
+	auto schema_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataSchemaName());
+	auto metadata_path = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataPath());
+	auto data_path = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.DataPath());
+
+	query = StringUtil::Replace(query, "{METADATA_CATALOG_NAME_LITERAL}", catalog_literal);
+	query = StringUtil::Replace(query, "{METADATA_CATALOG_NAME_IDENTIFIER}", catalog_identifier);
+	query = StringUtil::Replace(query, "{METADATA_SCHEMA_NAME_LITERAL}", schema_literal);
+	query = StringUtil::Replace(query, "{METADATA_CATALOG}", catalog_identifier + "." + schema_identifier);
+	query = StringUtil::Replace(query, "{METADATA_SCHEMA_ESCAPED}", schema_identifier_escaped);
+	query = StringUtil::Replace(query, "{METADATA_PATH}", metadata_path);
+	query = StringUtil::Replace(query, "{DATA_PATH}", data_path);
+}
+
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(string query) {
+	auto &ducklake_catalog = transaction.GetCatalog();
+	FillCatalogArgs(query, ducklake_catalog);
 	return transaction.Query(std::move(query));
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Execute(DuckLakeSnapshot snapshot, string query) {
-	return transaction.Query(snapshot, std::move(query));
+	auto &commit_info = transaction.GetCommitInfo();
+
+	FillSnapshotArgs(query, snapshot);
+	FillSnapshotCommitArgs(query, commit_info);
+
+	return Execute(std::move(query));
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::ExecuteCommit(DuckLakeSnapshot snapshot, string query) {
@@ -1941,11 +2040,18 @@ unique_ptr<QueryResult> DuckLakeMetadataManager::ExecuteCommit(DuckLakeSnapshot 
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Query(string query) {
+	auto &ducklake_catalog = transaction.GetCatalog();
+	FillCatalogArgs(query, ducklake_catalog);
 	return transaction.Query(std::move(query));
 }
 
 unique_ptr<QueryResult> DuckLakeMetadataManager::Query(DuckLakeSnapshot snapshot, string query) {
-	return transaction.Query(snapshot, std::move(query));
+	auto &commit_info = transaction.GetCommitInfo();
+
+	FillSnapshotArgs(query, snapshot);
+	FillSnapshotCommitArgs(query, commit_info);
+
+	return Query(std::move(query));
 }
 
 string DuckLakeMetadataManager::DropMacros(const set<MacroIndex> &ids) {
@@ -3386,9 +3492,9 @@ ORDER BY table_id NULLS FIRST;
 }
 
 SnapshotDeletedFromFiles
-DuckLakeMetadataManager::GetFilesDeletedOrDroppedAfterSnapshot(const DuckLakeSnapshot &start_snapshot) const {
+DuckLakeMetadataManager::GetFilesDeletedOrDroppedAfterSnapshot(const DuckLakeSnapshot &start_snapshot) {
 	// get all changes made to the system after the snapshot was started
-	auto result = Execute(start_snapshot, R"(
+	auto result = Query(start_snapshot, R"(
 	SELECT data_file_id
 	FROM {METADATA_CATALOG}.ducklake_delete_file
 	WHERE begin_snapshot > {SNAPSHOT_ID}
