@@ -53,13 +53,12 @@ public:
 	void Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) override;
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
+	SimilarCatalogEntry GetSimilarEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 
 	void AddEntry(CatalogType type, unique_ptr<CatalogEntry> entry);
 	void TryDropSchema(DuckLakeTransaction &transaction, bool cascade);
 
 	static bool CatalogTypeIsSupported(CatalogType type);
-
-	static string GeneratePathFromName(const string &uuid, const string &name);
 
 private:
 	DuckLakeCatalogSet &GetCatalogSet(CatalogType type);
@@ -74,6 +73,8 @@ private:
 	string schema_uuid;
 	string data_path;
 	DuckLakeCatalogSet tables;
+	DuckLakeCatalogSet scalar_macros;
+	DuckLakeCatalogSet table_macros;
 	mutex default_function_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> default_function_map;
 };

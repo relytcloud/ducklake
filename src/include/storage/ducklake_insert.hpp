@@ -35,6 +35,8 @@ public:
 	vector<DuckLakeDataFile> written_files;
 	idx_t total_insert_count;
 	case_insensitive_set_t not_null_fields;
+	//! Total rows flushed (used by flush_inlined_data)
+	idx_t rows_flushed = 0;
 };
 
 class DuckLakeInsert : public PhysicalOperator {
@@ -64,7 +66,8 @@ public:
 
 public:
 	// // Source interface
-	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const override;
+	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
+	                                 OperatorSourceInput &input) const override;
 
 	bool IsSource() const override {
 		return true;

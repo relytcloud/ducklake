@@ -17,7 +17,13 @@ enum class ChangeType {
 	FLUSHED_INLINE_DATA_FOR_TABLE,
 	ALTERED_TABLE,
 	ALTERED_VIEW,
-	COMPACTED_TABLE
+	COMPACTED_TABLE,
+	MERGE_ADJACENT,
+	REWRITE_DELETE,
+	CREATED_SCALAR_MACRO,
+	CREATED_TABLE_MACRO,
+	DROPPED_SCALAR_MACRO,
+	DROPPED_TABLE_MACRO
 };
 
 struct ChangeInfo {
@@ -37,6 +43,10 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::CREATED_TABLE;
 	} else if (StringUtil::CIEquals(change_type_str, "created_view")) {
 		return ChangeType::CREATED_VIEW;
+	} else if (StringUtil::CIEquals(change_type_str, "created_scalar_macro")) {
+		return ChangeType::CREATED_SCALAR_MACRO;
+	} else if (StringUtil::CIEquals(change_type_str, "created_table_macro")) {
+		return ChangeType::CREATED_TABLE_MACRO;
 	} else if (StringUtil::CIEquals(change_type_str, "created_schema")) {
 		return ChangeType::CREATED_SCHEMA;
 	} else if (StringUtil::CIEquals(change_type_str, "dropped_schema")) {
@@ -47,6 +57,10 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::DROPPED_VIEW;
 	} else if (StringUtil::CIEquals(change_type_str, "inserted_into_table")) {
 		return ChangeType::INSERTED_INTO_TABLE;
+	} else if (StringUtil::CIEquals(change_type_str, "dropped_scalar_macro")) {
+		return ChangeType::DROPPED_SCALAR_MACRO;
+	} else if (StringUtil::CIEquals(change_type_str, "dropped_table_macro")) {
+		return ChangeType::DROPPED_TABLE_MACRO;
 	} else if (StringUtil::CIEquals(change_type_str, "altered_table")) {
 		return ChangeType::ALTERED_TABLE;
 	} else if (StringUtil::CIEquals(change_type_str, "altered_view")) {
@@ -55,11 +69,16 @@ ChangeType ParseChangeType(const string &changes_made, idx_t &pos) {
 		return ChangeType::DELETED_FROM_TABLE;
 	} else if (StringUtil::CIEquals(change_type_str, "compacted_table")) {
 		return ChangeType::COMPACTED_TABLE;
+	} else if (StringUtil::CIEquals(change_type_str, "merge_adjacent")) {
+		return ChangeType::MERGE_ADJACENT;
+	} else if (StringUtil::CIEquals(change_type_str, "rewrite_delete")) {
+		return ChangeType::REWRITE_DELETE;
 	} else if (StringUtil::CIEquals(change_type_str, "inlined_insert")) {
 		return ChangeType::INSERTED_INTO_TABLE_INLINED;
 	} else if (StringUtil::CIEquals(change_type_str, "inlined_delete")) {
 		return ChangeType::DELETED_FROM_TABLE_INLINED;
-	} else if (StringUtil::CIEquals(change_type_str, "flushed_inlined")) {
+	} else if (StringUtil::CIEquals(change_type_str, "flushed_inlined") ||
+	           StringUtil::CIEquals(change_type_str, "inline_flush")) {
 		return ChangeType::FLUSHED_INLINE_DATA_FOR_TABLE;
 	} else {
 		throw InvalidInputException("Unsupported change type %s", change_type_str);
@@ -120,6 +139,18 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			result.created_tables[catalog_value.schema].insert(make_pair(std::move(catalog_value.name), "table"));
 			break;
 		}
+		case ChangeType::CREATED_SCALAR_MACRO: {
+			auto catalog_value = DuckLakeUtil::ParseCatalogEntry(entry.change_value);
+			result.created_scalar_macros[catalog_value.schema].insert(
+			    make_pair(std::move(catalog_value.name), "scalar_macro"));
+			break;
+		}
+		case ChangeType::CREATED_TABLE_MACRO: {
+			auto catalog_value = DuckLakeUtil::ParseCatalogEntry(entry.change_value);
+			result.created_scalar_macros[catalog_value.schema].insert(
+			    make_pair(std::move(catalog_value.name), "table_macro"));
+			break;
+		}
 		case ChangeType::CREATED_VIEW: {
 			auto catalog_value = DuckLakeUtil::ParseCatalogEntry(entry.change_value);
 			result.created_tables[catalog_value.schema].insert(make_pair(std::move(catalog_value.name), "view"));
@@ -136,6 +167,12 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::DROPPED_TABLE:
 			result.dropped_tables.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::DROPPED_SCALAR_MACRO:
+			result.dropped_scalar_macros.insert(MacroIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::DROPPED_TABLE_MACRO:
+			result.dropped_table_macros.insert(MacroIndex(StringUtil::ToUnsigned(entry.change_value)));
 			break;
 		case ChangeType::DROPPED_VIEW:
 			result.dropped_views.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
@@ -154,6 +191,12 @@ SnapshotChangeInformation SnapshotChangeInformation::ParseChangesMade(const stri
 			break;
 		case ChangeType::COMPACTED_TABLE:
 			result.tables_compacted.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::MERGE_ADJACENT:
+			result.tables_merge_adjacent.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
+			break;
+		case ChangeType::REWRITE_DELETE:
+			result.tables_rewrite_delete.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));
 			break;
 		case ChangeType::INSERTED_INTO_TABLE_INLINED:
 			result.tables_inserted_inlined.insert(TableIndex(StringUtil::ToUnsigned(entry.change_value)));

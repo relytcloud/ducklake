@@ -5,6 +5,7 @@
 #include "storage/ducklake_storage.hpp"
 #include "functions/ducklake_table_functions.hpp"
 #include "storage/ducklake_secret.hpp"
+#include "duckdb/storage/storage_extension.hpp"
 
 namespace duckdb {
 
@@ -12,7 +13,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.SetDescription("Adds support for DuckLake, SQL as a Lakehouse Format");
 
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.storage_extensions["ducklake"] = make_uniq<DuckLakeStorageExtension>();
+	StorageExtension::Register(config, "ducklake", make_shared_ptr<DuckLakeStorageExtension>());
 
 	config.AddExtensionOption("ducklake_max_retry_count",
 	                          "The maximum amount of retry attempts for a ducklake transaction", LogicalType::UBIGINT,
@@ -24,6 +25,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("ducklake_default_table_path",
 	                          "Default directory path for DuckLake tables. If set, tables will be created under this path",
 	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION);
+	config.AddExtensionOption("ducklake_default_data_inlining_row_limit",
+	                          "Default row limit for data inlining (0 disables inlining)", LogicalType::UBIGINT,
+	                          Value::UBIGINT(10), nullptr, SetScope::GLOBAL);
 
 	DuckLakeSnapshotsFunction snapshots;
 	loader.RegisterFunction(snapshots);
@@ -70,7 +74,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	DuckLakeListFilesFunction list_files;
 	loader.RegisterFunction(list_files);
 
-	DuckLakeAddDataFilesFunction add_files;
+	auto add_files = DuckLakeAddDataFilesFunction::GetFunctions();
 	loader.RegisterFunction(add_files);
 
 	DuckLakeCurrentSnapshotFunction current_snapshot;
@@ -78,6 +82,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	DuckLakeLastCommittedSnapshotFunction last_committed;
 	loader.RegisterFunction(last_committed);
+
+	DuckLakeSettingsFunction settings;
+	loader.RegisterFunction(settings);
 
 	// secrets
 	auto secret_type = DuckLakeSecret::GetSecretType();

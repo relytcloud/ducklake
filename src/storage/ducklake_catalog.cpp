@@ -1,6 +1,7 @@
 #include "storage/ducklake_catalog.hpp"
 
 #include "common/ducklake_types.hpp"
+#include "duckdb/catalog/catalog_entry/macro_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -17,8 +18,14 @@
 #include "storage/ducklake_transaction_manager.hpp"
 #include "storage/ducklake_view_entry.hpp"
 #include "duckdb/main/database_path_and_type.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
+#include "duckdb/parser/parsed_data/create_macro_info.hpp"
+#include "duckdb/function/macro_function.hpp"
+#include "duckdb/function/scalar_macro_function.hpp"
+#include "duckdb/function/table_macro_function.hpp"
+#include "storage/ducklake_macro_entry.hpp"
 
 namespace duckdb {
 
@@ -53,6 +60,15 @@ void DuckLakeCatalog::FinalizeLoad(optional_ptr<ClientContext> context) {
 		con = make_uniq<Connection>(GetDatabase());
 		con->BeginTransaction();
 		context = con->context.get();
+	}
+	// If data_inlining_row_limit wasn't explicitly set via ATTACH options,
+	// use the global DuckDB setting as the default
+	if (options.config_options.find("data_inlining_row_limit") == options.config_options.end()) {
+		Value setting_val;
+		if (context->TryGetCurrentSetting("ducklake_default_data_inlining_row_limit", setting_val)) {
+			auto limit = setting_val.GetValue<idx_t>();
+			options.config_options["data_inlining_row_limit"] = to_string(limit);
+		}
 	}
 	DuckLakeInitializer initializer(*context, *this, options);
 	initializer.Initialize();
@@ -164,9 +180,9 @@ optional_ptr<CatalogEntry> DuckLakeCatalog::GetEntryById(DuckLakeTransaction &tr
 	return schema.GetEntryById(table_id);
 }
 
-idx_t DuckLakeCatalog::GetSnapshotForSchema(idx_t schema_id, DuckLakeTransaction &transaction) {
+idx_t DuckLakeCatalog::GetBeginSnapshotForTable(TableIndex table_id, DuckLakeTransaction &transaction) {
 	auto &metadata_manager = transaction.GetMetadataManager();
-	return metadata_manager.GetCatalogIdForSchema(schema_id);
+	return metadata_manager.GetBeginSnapshotForTable(table_id);
 }
 
 DuckLakeCatalogSet &DuckLakeCatalog::GetSchemaForSnapshot(DuckLakeTransaction &transaction, DuckLakeSnapshot snapshot) {
@@ -189,7 +205,21 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 	if (col.children.empty()) {
 		auto col_type = DuckLakeTypes::FromString(col.type);
 		col_data.initial_default = col.initial_default.DefaultCastAs(col_type);
-		col_data.default_value = col.default_value.DefaultCastAs(col_type);
+		if (col.default_value.IsNull()) {
+			col_data.default_value = make_uniq<ConstantExpression>(Value());
+		} else {
+			if (col.default_value_type == "literal") {
+				col_data.default_value = make_uniq<ConstantExpression>(col.default_value);
+			} else if (col.default_value_type == "expression") {
+				auto sql_expr = Parser::ParseExpressionList(col.default_value.GetValue<string>());
+				if (sql_expr.size() != 1) {
+					throw InternalException("Expected a single expression");
+				}
+				col_data.default_value = std::move(sql_expr[0]);
+			} else {
+				throw NotImplementedException("Column type %s is not supported", col.default_value_type);
+			}
+		}
 		return make_uniq<DuckLakeFieldId>(std::move(col_data), col.name, std::move(col_type));
 	}
 	if (StringUtil::CIEquals(col.type, "struct")) {
@@ -230,6 +260,60 @@ static unique_ptr<DuckLakeFieldId> TransformColumnType(DuckLakeColumnInfo &col) 
 		                                  std::move(child_fields));
 	}
 	throw InvalidInputException("Unrecognized nested type \"%s\"", col.type);
+}
+
+unique_ptr<CreateMacroInfo> CreateMacroInfoFromDucklake(ClientContext &context, DuckLakeMacroInfo &macro,
+                                                        string schema_name) {
+	CatalogType type;
+	if (macro.implementations.front().type == "scalar") {
+		type = CatalogType::MACRO_ENTRY;
+	} else if (macro.implementations.front().type == "table") {
+		type = CatalogType::TABLE_MACRO_ENTRY;
+	} else {
+		throw NotImplementedException("Macro type %s is not implemented", macro.implementations.front().type);
+	}
+	auto macro_info = make_uniq<CreateMacroInfo>(type);
+	macro_info->name = macro.macro_name;
+	macro_info->schema = schema_name;
+	macro_info->temporary = false;
+	macro_info->internal = false;
+	for (auto &impl : macro.implementations) {
+		unique_ptr<MacroFunction> macro_function;
+		if (impl.type == "scalar") {
+			auto sql_expr = Parser::ParseExpressionList(impl.sql);
+			if (sql_expr.size() != 1) {
+				throw InternalException("Expected a single expression");
+			}
+			macro_function = make_uniq<ScalarMacroFunction>(std::move(sql_expr[0]));
+		} else if (impl.type == "table") {
+			Parser parser;
+			parser.ParseQuery(impl.sql);
+			if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
+				throw InternalException("Expected a single select statement");
+			}
+			auto node = std::move(parser.statements[0]->Cast<SelectStatement>().node);
+			macro_function = make_uniq<TableMacroFunction>(std::move(node));
+		} else {
+			throw InternalException("Unrecognized macro type %s in CreateMacroInfoFromDucklake", impl.type);
+		}
+		vector<unique_ptr<ParsedExpression>> expr_list;
+		for (auto &param : impl.parameters) {
+			expr_list = Parser::ParseExpressionList(param.default_value.ToSQLString());
+			if (expr_list.size() != 1) {
+				throw InternalException("Expected a single expression");
+			}
+			macro_function->parameters.push_back(make_uniq<ColumnRefExpression>(param.parameter_name));
+			auto &expression = expr_list[0]->Cast<ConstantExpression>();
+			auto expr_type = DuckLakeTypes::FromString(param.default_value_type);
+			if (expr_type.id() != LogicalTypeId::UNKNOWN) {
+				expression.value = expression.value.CastAs(context, expr_type);
+				macro_function->default_parameters.insert(make_pair(param.parameter_name, std::move(expr_list[0])));
+			}
+			macro_function->types.push_back(DuckLakeTypes::FromString(param.parameter_type));
+		}
+		macro_info->macros.push_back(std::move(macro_function));
+	}
+	return macro_info;
 }
 
 unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTransaction &transaction,
@@ -324,6 +408,29 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		schema_set->AddEntry(schema_entry, view.id, std::move(view_entry));
 	}
 
+	// load the macros
+	for (auto &macro : catalog.macros) {
+		auto entry = schema_id_map.find(macro.schema_id);
+		if (entry == schema_id_map.end()) {
+			throw InvalidInputException(
+			    "Failed to load DuckLake - could not find schema that corresponds to the macro entry \"%s\"",
+			    macro.macro_name);
+		}
+		auto &schema_entry = entry->second.get();
+		auto create_macro = CreateMacroInfoFromDucklake(*transaction.context.lock(), macro, schema_entry.name);
+		if (macro.implementations.front().type == "scalar") {
+			auto macro_catalog_entry =
+			    make_uniq<DuckLakeScalarMacroEntry>(*this, schema_entry, *create_macro, macro.macro_id);
+			schema_set->AddEntry(schema_entry, macro.macro_id, std::move(macro_catalog_entry));
+		} else if (macro.implementations.front().type == "table") {
+			auto macro_catalog_entry =
+			    make_uniq<DuckLakeTableMacroEntry>(*this, schema_entry, *create_macro, macro.macro_id);
+			schema_set->AddEntry(schema_entry, macro.macro_id, std::move(macro_catalog_entry));
+		} else {
+			throw InvalidInputException("Macro type %s is not accepted", macro.implementations.front().type);
+		}
+	}
+
 	// load the partition entries
 	for (auto &entry : catalog.partitions) {
 		auto table = schema_set->GetEntryById(entry.table_id);
@@ -354,6 +461,29 @@ unique_ptr<DuckLakeCatalogSet> DuckLakeCatalog::LoadSchemaForSnapshot(DuckLakeTr
 		auto &ducklake_table = table->Cast<DuckLakeTableEntry>();
 		ducklake_table.SetPartitionData(std::move(partition));
 	}
+
+	// load the sort entries
+	for (auto &entry : catalog.sorts) {
+		auto table = schema_set->GetEntryById(entry.table_id);
+		if (!table || table->type != CatalogType::TABLE_ENTRY) {
+			throw InvalidInputException("Could not find matching table for sort entry");
+		}
+		auto sort = make_uniq<DuckLakeSort>();
+		sort->sort_id = entry.id.GetIndex();
+		for (auto &field : entry.fields) {
+			DuckLakeSortField sort_field;
+			sort_field.sort_key_index = field.sort_key_index;
+			sort_field.expression = field.expression;
+			sort_field.dialect = field.dialect;
+			sort_field.sort_direction = field.sort_direction;
+			sort_field.null_order = field.null_order;
+
+			sort->fields.push_back(sort_field);
+		}
+		auto &ducklake_table = table->Cast<DuckLakeTableEntry>();
+		ducklake_table.SetSortData(std::move(sort));
+	}
+
 	return schema_set;
 }
 
@@ -686,7 +816,7 @@ bool DuckLakeCatalog::TryGetConfigOption(const string &option, string &result, D
 }
 
 idx_t DuckLakeCatalog::DataInliningRowLimit(SchemaIndex schema_index, TableIndex table_index) const {
-	return GetConfigOption<idx_t>("data_inlining_row_limit", schema_index, table_index, 0);
+	return GetConfigOption<idx_t>("data_inlining_row_limit", schema_index, table_index, 10);
 }
 
 unique_ptr<LogicalOperator> DuckLakeCatalog::BindAlterAddIndex(Binder &binder, TableCatalogEntry &table_entry,

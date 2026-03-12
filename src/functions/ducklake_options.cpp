@@ -33,12 +33,9 @@ static constexpr const ducklake_option_array DUCKLAKE_OPTIONS = {
      {"delete_older_than", "How old unused files must be to be removed by the 'ducklake_delete_orphaned_files' and "
                            "'ducklake_cleanup_old_files' cleanup functions."},
      {"expire_older_than", "How old snapshots must be, by default, to be expired by: 'ducklake_expire_snapshots'"},
-     {"compaction_schema", "Pre-defined schema used as a default value for the following compaction functions "
-                           "'ducklake_flush_inlined_data','ducklake_merge_adjacent_files', "
-                           "'ducklake_rewrite_data_files', 'ducklake_delete_orphaned_files'"},
-     {"compaction_table", "Pre-defined table used as a default value for the following compaction functions "
-                          "'ducklake_flush_inlined_data','ducklake_merge_adjacent_files', "
-                          "'ducklake_rewrite_data_files', 'ducklake_delete_orphaned_files'"},
+     {"auto_compact", "Pre-defined schema used as a default value for the following compaction functions "
+                      "'ducklake_flush_inlined_data','ducklake_merge_adjacent_files', "
+                      "'ducklake_rewrite_data_files', 'ducklake_delete_orphaned_files'"},
      {"encrypted", "Whether or not to encrypt Parquet files written to the data path"},
      {"per_thread_output", "Whether to create separate output files per thread during parallel insertion"}}};
 
@@ -67,7 +64,7 @@ struct DuckLakeOptionsState : public GlobalTableFunctionState {
 
 static unique_ptr<FunctionData> DuckLakeOptionsBind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<string> &names) {
-	auto &catalog = BaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 
 	names.emplace_back("option_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
@@ -171,7 +168,8 @@ void DuckLakeOptionsExecute(ClientContext &context, TableFunctionInput &data_p, 
 	output.SetCardinality(count);
 }
 
-DuckLakeOptionsFunction::DuckLakeOptionsFunction() : BaseMetadataFunction("ducklake_options", DuckLakeOptionsBind) {
+DuckLakeOptionsFunction::DuckLakeOptionsFunction()
+    : DuckLakeBaseMetadataFunction("ducklake_options", DuckLakeOptionsBind) {
 	init_global = DuckLakeOptionsInit;
 	function = DuckLakeOptionsExecute;
 }

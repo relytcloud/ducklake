@@ -84,12 +84,32 @@ vector<Value> DuckLakeSnapshotsFunction::GetSnapshotValues(const DuckLakeSnapsho
 
 	case_insensitive_map_t<case_insensitive_set_t> created_tables;
 	case_insensitive_map_t<case_insensitive_set_t> created_views;
+	case_insensitive_map_t<case_insensitive_set_t> created_table_macros;
+	case_insensitive_map_t<case_insensitive_set_t> created_scalar_macros;
 	for (auto &entry : other_changes.created_tables) {
 		for (auto &sub_entry : entry.second) {
 			if (sub_entry.second == "table") {
 				created_tables[entry.first].insert(sub_entry.first);
 			} else {
 				created_views[entry.first].insert(sub_entry.first);
+			}
+		}
+	}
+	for (auto &entry : other_changes.created_scalar_macros) {
+		for (auto &sub_entry : entry.second) {
+			if (sub_entry.second == "scalar_macro") {
+				created_scalar_macros[entry.first].insert(sub_entry.first);
+			} else {
+				throw InternalException("Unexpected type for macro in GetSnapshotValues");
+			}
+		}
+	}
+	for (auto &entry : other_changes.created_table_macros) {
+		for (auto &sub_entry : entry.second) {
+			if (sub_entry.second == "table_macro") {
+				created_table_macros[entry.first].insert(sub_entry.first);
+			} else {
+				throw InternalException("Unexpected type for macro in GetSnapshotValues");
 			}
 		}
 	}
@@ -102,15 +122,27 @@ vector<Value> DuckLakeSnapshotsFunction::GetSnapshotValues(const DuckLakeSnapsho
 		change_keys.emplace_back("views_created");
 		change_values.push_back(CatalogListToValue(created_views));
 	}
+	if (!created_scalar_macros.empty()) {
+		change_keys.emplace_back("scalar_macros_created");
+		change_values.push_back(CatalogListToValue(created_scalar_macros));
+	}
+	if (!created_table_macros.empty()) {
+		change_keys.emplace_back("table_macros_created");
+		change_values.push_back(CatalogListToValue(created_table_macros));
+	}
 	PushIDChangeList(change_keys, change_values, other_changes.dropped_tables, "tables_dropped");
 	PushIDChangeList(change_keys, change_values, other_changes.altered_tables, "tables_altered");
 	PushIDChangeList(change_keys, change_values, other_changes.inserted_tables, "tables_inserted_into");
 	PushIDChangeList(change_keys, change_values, other_changes.tables_deleted_from, "tables_deleted_from");
 	PushIDChangeList(change_keys, change_values, other_changes.dropped_views, "views_dropped");
+	PushIDChangeList(change_keys, change_values, other_changes.dropped_scalar_macros, "scalar_macros_dropped");
+	PushIDChangeList(change_keys, change_values, other_changes.dropped_table_macros, "table_macros_dropped");
 	PushIDChangeList(change_keys, change_values, other_changes.altered_views, "views_altered");
 	PushIDChangeList(change_keys, change_values, other_changes.tables_inserted_inlined, "inlined_insert");
 	PushIDChangeList(change_keys, change_values, other_changes.tables_deleted_inlined, "inlined_delete");
 	PushIDChangeList(change_keys, change_values, other_changes.tables_flushed_inlined, "flushed_inlined");
+	PushIDChangeList(change_keys, change_values, other_changes.tables_merge_adjacent, "merge_adjacent");
+	PushIDChangeList(change_keys, change_values, other_changes.tables_rewrite_delete, "rewrite_delete");
 
 	row_values.push_back(Value::MAP(LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR),
 	                                std::move(change_keys), std::move(change_values)));
@@ -122,7 +154,7 @@ vector<Value> DuckLakeSnapshotsFunction::GetSnapshotValues(const DuckLakeSnapsho
 
 static unique_ptr<FunctionData> DuckLakeSnapshotsBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
-	auto &catalog = BaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	auto &transaction = DuckLakeTransaction::Get(context, catalog);
 
 	auto &metadata_manager = transaction.GetMetadataManager();
@@ -137,7 +169,7 @@ static unique_ptr<FunctionData> DuckLakeSnapshotsBind(ClientContext &context, Ta
 }
 
 DuckLakeSnapshotsFunction::DuckLakeSnapshotsFunction()
-    : BaseMetadataFunction("ducklake_snapshots", DuckLakeSnapshotsBind) {
+    : DuckLakeBaseMetadataFunction("ducklake_snapshots", DuckLakeSnapshotsBind) {
 }
 
 } // namespace duckdb

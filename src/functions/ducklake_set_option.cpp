@@ -17,7 +17,7 @@ struct DuckLakeSetOptionData : public TableFunctionData {
 
 static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
-	auto &catalog = BaseMetadataFunction::GetCatalog(context, input.inputs[0]);
+	auto &catalog = DuckLakeBaseMetadataFunction::GetCatalog(context, input.inputs[0]);
 	DuckLakeConfigOption config_option;
 	auto &option = config_option.option.key;
 	auto &value = config_option.option.value;
@@ -89,11 +89,11 @@ static unique_ptr<FunctionData> DuckLakeSetOptionBind(ClientContext &context, Ta
 			}
 		}
 		value = val.ToString();
-	} else if (option == "compaction_schema" || option == "compaction_table") {
+	} else if (option == "auto_compact") {
 		if (val.IsNull()) {
 			throw BinderException("The %s option can't be null.", option.c_str());
 		}
-		value = val.ToString();
+		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
 	} else if (option == "per_thread_output") {
 		value = val.CastAs(context, LogicalType::BOOLEAN).GetValue<bool>() ? "true" : "false";
 	} else {
