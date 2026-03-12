@@ -23,6 +23,9 @@ public:
 	bool TypeIsNativelySupported(const LogicalType &type) override;
 	string CastColumnToTarget(const string &stats, const LogicalType &type) override;
 	bool SupportsInlining(const LogicalType &type) override;
+	bool SupportsAppender() const override {
+		return false;
+	}
 
 	string GetColumnTypeInternal(const LogicalType &type) override;
 
