@@ -79,6 +79,49 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	}
 }
 
+string PostgresMetadataManager::GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
+                                                            bool create_if_not_exists) {
+	// The base class checks existence with "SELECT NULL FROM table LIMIT 1",
+	// which aborts the Postgres transaction when the table doesn't exist.
+	// Use an information_schema query instead so the transaction stays valid.
+	string table_name = StringUtil::Format("ducklake_inlined_delete_%d", table_id.index);
+
+	if (delete_inlined_table_cache.find(table_id.index) != delete_inlined_table_cache.end()) {
+		return table_name;
+	}
+
+	if (create_if_not_exists) {
+		auto create_query = StringUtil::Format(
+		    "CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s(file_id BIGINT, row_id BIGINT, begin_snapshot BIGINT);",
+		    table_name);
+		auto create_result = Query(snapshot, create_query);
+		if (create_result->HasError()) {
+			create_result->GetErrorObject().Throw("Failed to create inlined deletion table: ");
+		}
+		delete_inlined_table_cache.insert(table_id.index);
+		return table_name;
+	}
+
+	auto query = StringUtil::Format(R"(
+SELECT 1 FROM information_schema.tables
+WHERE table_schema = {METADATA_SCHEMA_NAME_LITERAL} AND table_name = '%s'
+)", table_name);
+	auto result = Query(snapshot, query);
+	if (!result->HasError()) {
+		bool found = false;
+		for (auto &row : *result) {
+			(void)row;
+			found = true;
+			break;
+		}
+		if (found) {
+			delete_inlined_table_cache.insert(table_id.index);
+			return table_name;
+		}
+	}
+	return string();
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteQuery(DuckLakeSnapshot snapshot, string &query,
                                                               string command) {
 	auto &commit_info = transaction.GetCommitInfo();

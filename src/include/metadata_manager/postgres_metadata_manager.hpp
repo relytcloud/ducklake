@@ -28,6 +28,8 @@ public:
 	}
 
 	string GetColumnTypeInternal(const LogicalType &type) override;
+	string GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
+	                                   bool create_if_not_exists = false) override;
 
 	unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string query) override;
 

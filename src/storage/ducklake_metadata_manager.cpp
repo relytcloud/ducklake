@@ -1637,16 +1637,16 @@ LEFT JOIN LATERAL (
 	ORDER BY data_file_id, begin_snapshot DESC
 ) AS previous_delete
 USING (data_file_id), (
-	SELECT NULL path, NULL path_is_relative, NULL file_size_bytes, NULL footer_size, NULL encryption_key
+	SELECT NULL::VARCHAR AS path, NULL::BOOLEAN AS path_is_relative, NULL::BIGINT AS file_size_bytes, NULL::BIGINT AS footer_size, NULL::VARCHAR AS encryption_key
 ) current_delete
 )",
 	                            select_list, table_id.index, table_id.index, start_snapshot.snapshot_id, table_id.index,
 	                            select_list, table_id.index, start_snapshot.snapshot_id, table_id.index);
 
 	if (has_inlined_table) {
-		string null_file_cols = "NULL path, NULL path_is_relative, NULL file_size_bytes, NULL footer_size";
+		string null_file_cols = "NULL::VARCHAR AS path, NULL::BOOLEAN AS path_is_relative, NULL::BIGINT AS file_size_bytes, NULL::BIGINT AS footer_size";
 		if (IsEncrypted()) {
-			null_file_cols += ", NULL encryption_key";
+			null_file_cols += ", NULL::VARCHAR AS encryption_key";
 		}
 		query += StringUtil::Format(R"(
 UNION ALL
