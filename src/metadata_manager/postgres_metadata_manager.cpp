@@ -1,8 +1,10 @@
 #include "metadata_manager/postgres_metadata_manager.hpp"
 #include "common/ducklake_util.hpp"
-#include "duckdb/main/database.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_metadata_info.hpp"
+#include "storage/ducklake_metadata_manager.hpp"
 #include "storage/ducklake_transaction.hpp"
+#include "yyjson.hpp"
 
 namespace duckdb {
 
@@ -77,6 +79,49 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	}
 }
 
+string PostgresMetadataManager::GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
+                                                            bool create_if_not_exists) {
+	// The base class checks existence with "SELECT NULL FROM table LIMIT 1",
+	// which aborts the Postgres transaction when the table doesn't exist.
+	// Use an information_schema query instead so the transaction stays valid.
+	string table_name = StringUtil::Format("ducklake_inlined_delete_%d", table_id.index);
+
+	if (delete_inlined_table_cache.find(table_id.index) != delete_inlined_table_cache.end()) {
+		return table_name;
+	}
+
+	if (create_if_not_exists) {
+		auto create_query = StringUtil::Format(
+		    "CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s(file_id BIGINT, row_id BIGINT, begin_snapshot BIGINT);",
+		    table_name);
+		auto create_result = Query(snapshot, create_query);
+		if (create_result->HasError()) {
+			create_result->GetErrorObject().Throw("Failed to create inlined deletion table: ");
+		}
+		delete_inlined_table_cache.insert(table_id.index);
+		return table_name;
+	}
+
+	auto query = StringUtil::Format(R"(
+SELECT 1 FROM information_schema.tables
+WHERE table_schema = {METADATA_SCHEMA_NAME_LITERAL} AND table_name = '%s'
+)", table_name);
+	auto result = Query(snapshot, query);
+	if (!result->HasError()) {
+		bool found = false;
+		for (auto &row : *result) {
+			(void)row;
+			found = true;
+			break;
+		}
+		if (found) {
+			delete_inlined_table_cache.insert(table_id.index);
+			return table_name;
+		}
+	}
+	return string();
+}
+
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteQuery(DuckLakeSnapshot snapshot, string &query,
                                                               string command) {
 	auto &commit_info = transaction.GetCommitInfo();
@@ -109,22 +154,195 @@ unique_ptr<QueryResult> PostgresMetadataManager::ExecuteQuery(DuckLakeSnapshot s
 
 	return connection.Query(StringUtil::Format("CALL %s(%s, %s)", command, catalog_literal, SQLString(query)));
 }
-unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, string &query) {
+
+unique_ptr<QueryResult> PostgresMetadataManager::Execute(DuckLakeSnapshot snapshot, string query) {
 	return ExecuteQuery(snapshot, query, "postgres_execute");
 }
 
-unique_ptr<QueryResult> PostgresMetadataManager::Query(DuckLakeSnapshot snapshot, string &query) {
+unique_ptr<QueryResult> PostgresMetadataManager::Query(DuckLakeSnapshot snapshot, string query) {
 	return ExecuteQuery(snapshot, query, "postgres_query");
 }
 
 string PostgresMetadataManager::GetLatestSnapshotQuery() const {
 	return R"(
-	SELECT * FROM postgres_query({METADATA_CATALOG_NAME_LITERAL},
-		'SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
-		 FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot WHERE snapshot_id = (
-		     SELECT MAX(snapshot_id) FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot
-		 );')
+		SELECT snapshot_id, schema_version, next_catalog_id, next_file_id
+		FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot WHERE snapshot_id = (
+		    SELECT MAX(snapshot_id) FROM {METADATA_SCHEMA_ESCAPED}.ducklake_snapshot
+		);
 	)";
+}
+
+string PostgresMetadataManager::ListAggregation(const vector<pair<string, string>> &fields) const {
+	string fields_part;
+	for (auto const &entry : fields) {
+		if (!fields_part.empty()) {
+			fields_part += ", ";
+		}
+		fields_part += "'" + entry.first + "', " + entry.second;
+	}
+	return "json_agg(json_build_object(" + fields_part + "))";
+}
+
+string PostgresMetadataManager::CastStatsToTarget(const string &stats, const LogicalType &type) {
+	// PostgreSQL doesn't have TRY_CAST, use regular CAST with :: operator
+	// For numeric types, we cast directly; stats should be valid numeric values
+	if (type.IsNumeric()) {
+		return "(" + stats + " :: " + GetColumnTypeInternal(type) + ")";
+	}
+	return stats;
+}
+
+string PostgresMetadataManager::CastColumnToTarget(const string &stats, const LogicalType &type) {
+	// If not a pg native type, defer type cast to TransformInlinedData.
+	if (!TypeIsNativelySupported(type)) {
+		return stats;
+	}
+	// Also for nested types
+	if (type.id() == LogicalTypeId ::ARRAY) {
+		LogicalType child_type = ArrayType::GetChildType(type);
+
+		while (child_type.id() == LogicalTypeId::ARRAY) {
+			child_type = ArrayType::GetChildType(child_type);
+		}
+		if (!TypeIsNativelySupported(child_type)) {
+			return stats;
+		}
+	}
+	return stats + "::" + GetColumnTypeInternal(type);
+}
+
+vector<DuckLakeTag> PostgresMetadataManager::LoadTags(const Value &tag_map) const {
+	using namespace duckdb_yyjson; // NOLINT
+
+	vector<DuckLakeTag> result;
+
+	auto tags_json = tag_map.GetValue<string>();
+	auto doc = yyjson_read(tags_json.c_str(), tags_json.size(), 0);
+	if (!doc) {
+		throw InvalidInputException("Failed to parse tags JSON");
+	}
+	auto root = yyjson_doc_get_root(doc);
+	if (!yyjson_is_arr(root)) {
+		yyjson_doc_free(doc);
+		throw InvalidInputException("Invalid tags JSON: expected array");
+	}
+
+	idx_t idx, n_tag;
+	yyjson_val *tag_json;
+	yyjson_arr_foreach(root, idx, n_tag, tag_json) {
+		if (!yyjson_is_obj(tag_json)) {
+			yyjson_doc_free(doc);
+			throw InvalidInputException("Invalid tags JSON: expected object");
+		}
+
+		DuckLakeTag tag;
+
+		auto key = yyjson_obj_get(tag_json, "key");
+		auto value = yyjson_obj_get(tag_json, "value");
+		if (!yyjson_is_str(key)) {
+			yyjson_doc_free(doc);
+			throw InvalidInputException("Invalid tags JSON: missing required fields");
+		}
+
+		tag.key = yyjson_get_str(key);
+
+		// Value can be null or string - skip null values
+		if (yyjson_is_null(value)) {
+			continue;
+		}
+		if (!yyjson_is_str(value)) {
+			yyjson_doc_free(doc);
+			throw InvalidInputException("Invalid tags JSON: value must be string or null");
+		}
+		tag.value = yyjson_get_str(value);
+
+		result.push_back(std::move(tag));
+	}
+	yyjson_doc_free(doc);
+	return result;
+}
+
+vector<DuckLakeInlinedTableInfo> PostgresMetadataManager::LoadInlinedDataTables(const Value &list) const {
+	using namespace duckdb_yyjson; // NOLINT
+
+	vector<DuckLakeInlinedTableInfo> result;
+
+	auto json_str = list.GetValue<string>();
+	auto doc = yyjson_read(json_str.c_str(), json_str.size(), 0);
+	if (!doc) {
+		throw InvalidInputException("Failed to parse inlined data tables JSON");
+	}
+	auto root = yyjson_doc_get_root(doc);
+	if (!yyjson_is_arr(root)) {
+		yyjson_doc_free(doc);
+		throw InvalidInputException("Invalid inlined data tables JSON: expected array");
+	}
+
+	idx_t idx, n_tables;
+	yyjson_val *table_json;
+	yyjson_arr_foreach(root, idx, n_tables, table_json) {
+		if (!yyjson_is_obj(table_json)) {
+			yyjson_doc_free(doc);
+			throw InvalidInputException("Invalid inlined data tables JSON: expected object");
+		}
+
+		auto table_name = yyjson_obj_get(table_json, "name");
+		auto schema_version = yyjson_obj_get(table_json, "schema_version");
+		if (!yyjson_is_str(table_name) || !yyjson_is_num(schema_version)) {
+			yyjson_doc_free(doc);
+			throw InvalidInputException("Invalid inlined data tables JSON: missing required fields");
+		}
+
+		DuckLakeInlinedTableInfo info;
+		info.table_name = yyjson_get_str(table_name);
+		info.schema_version = yyjson_get_uint(schema_version);
+		result.push_back(std::move(info));
+	}
+	yyjson_doc_free(doc);
+	return result;
+}
+
+shared_ptr<DuckLakeInlinedData>
+PostgresMetadataManager::TransformInlinedData(QueryResult &result, const vector<LogicalType> &expected_types) {
+	if (result.HasError()) {
+		result.GetErrorObject().Throw("Failed to read inlined data from DuckLake: ");
+	}
+
+	// Transform the result by casting VARCHAR vectors to their expected types
+	auto context = transaction.context.lock();
+	auto data = make_uniq<ColumnDataCollection>(*context, expected_types);
+
+	while (true) {
+		auto chunk = result.Fetch();
+		if (!chunk) {
+			break;
+		}
+
+		// Create a new chunk with the expected types
+		DataChunk casted_chunk;
+		casted_chunk.Initialize(*context, expected_types, chunk->size());
+		casted_chunk.SetCardinality(chunk->size());
+
+		// Cast each column from VARCHAR to its expected type
+		for (idx_t col_idx = 0; col_idx < chunk->ColumnCount(); col_idx++) {
+			auto &source_vector = chunk->data[col_idx];
+			auto &target_vector = casted_chunk.data[col_idx];
+
+			if (source_vector.GetType() == target_vector.GetType()) {
+				// No casting needed, just copy
+				target_vector.Reference(source_vector);
+			} else {
+				// Cast from VARCHAR to the expected type
+				VectorOperations::Cast(*context, source_vector, target_vector, chunk->size());
+			}
+		}
+
+		data->Append(casted_chunk);
+	}
+
+	auto inlined_data = make_shared_ptr<DuckLakeInlinedData>();
+	inlined_data->data = std::move(data);
+	return inlined_data;
 }
 
 } // namespace duckdb
