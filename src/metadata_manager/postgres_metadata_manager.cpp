@@ -79,60 +79,29 @@ string PostgresMetadataManager::GetColumnTypeInternal(const LogicalType &column_
 	}
 }
 
-string PostgresMetadataManager::GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
-                                                            bool create_if_not_exists) {
+bool PostgresMetadataManager::InlinedDeletionTableExists(const string &table_name, DuckLakeSnapshot snapshot) {
 	// The base class checks existence with "SELECT NULL FROM table LIMIT 1",
 	// which aborts the Postgres transaction when the table doesn't exist.
 	// Use an information_schema query instead so the transaction stays valid.
-	string table_name = StringUtil::Format("ducklake_inlined_delete_%d", table_id.index);
-
-	if (delete_inlined_table_cache.find(table_id.index) != delete_inlined_table_cache.end()) {
-		return table_name;
-	}
-
-	if (create_if_not_exists) {
-		auto create_query = StringUtil::Format(
-		    "CREATE TABLE IF NOT EXISTS {METADATA_CATALOG}.%s(file_id BIGINT, row_id BIGINT, begin_snapshot BIGINT);",
-		    table_name);
-		auto create_result = Query(snapshot, create_query);
-		if (create_result->HasError()) {
-			create_result->GetErrorObject().Throw("Failed to create inlined deletion table: ");
-		}
-		delete_inlined_table_cache.insert(table_id.index);
-		return table_name;
-	}
-
 	auto query = StringUtil::Format(R"(
 SELECT 1 FROM information_schema.tables
 WHERE table_schema = {METADATA_SCHEMA_NAME_LITERAL} AND table_name = '%s'
 )", table_name);
 	auto result = Query(snapshot, query);
-	if (!result->HasError()) {
-		bool found = false;
-		for (auto &row : *result) {
-			(void)row;
-			found = true;
-			break;
-		}
-		if (found) {
-			delete_inlined_table_cache.insert(table_id.index);
-			return table_name;
-		}
+	if (result->HasError()) {
+		return false;
 	}
-	return string();
+	for (auto &row : *result) {
+		(void)row;
+		return true;
+	}
+	return false;
 }
 
 unique_ptr<QueryResult> PostgresMetadataManager::ExecuteQuery(DuckLakeSnapshot snapshot, string &query,
                                                               string command) {
-	auto &commit_info = transaction.GetCommitInfo();
-
-	query = StringUtil::Replace(query, "{SNAPSHOT_ID}", to_string(snapshot.snapshot_id));
-	query = StringUtil::Replace(query, "{SCHEMA_VERSION}", to_string(snapshot.schema_version));
-	query = StringUtil::Replace(query, "{NEXT_CATALOG_ID}", to_string(snapshot.next_catalog_id));
-	query = StringUtil::Replace(query, "{NEXT_FILE_ID}", to_string(snapshot.next_file_id));
-	query = StringUtil::Replace(query, "{AUTHOR}", commit_info.author.ToSQLString());
-	query = StringUtil::Replace(query, "{COMMIT_MESSAGE}", commit_info.commit_message.ToSQLString());
-	query = StringUtil::Replace(query, "{COMMIT_EXTRA_INFO}", commit_info.commit_extra_info.ToSQLString());
+	FillSnapshotArgs(query, snapshot);
+	FillSnapshotCommitArgs(query, transaction.GetCommitInfo());
 
 	auto &connection = transaction.GetConnection();
 	auto &ducklake_catalog = transaction.GetCatalog();

@@ -2631,14 +2631,17 @@ string DuckLakeMetadataManager::GetInlinedDeletionTableName(TableIndex table_id,
 		return table_name;
 	}
 
-	// Check if the table exists by querying duckdb_tables()
-	auto query = StringUtil::Format("SELECT NULL FROM {METADATA_CATALOG}.%s LIMIT 1", table_name);
-	auto result = Query(snapshot, query);
-	if (!result->HasError()) {
+	if (InlinedDeletionTableExists(table_name, snapshot)) {
 		delete_inlined_table_cache.insert(table_id.index);
 		return table_name;
 	}
 	return string();
+}
+
+bool DuckLakeMetadataManager::InlinedDeletionTableExists(const string &table_name, DuckLakeSnapshot snapshot) {
+	auto query = StringUtil::Format("SELECT NULL FROM {METADATA_CATALOG}.%s LIMIT 1", table_name);
+	auto result = Query(snapshot, query);
+	return !result->HasError();
 }
 
 shared_ptr<DuckLakeInlinedData> DuckLakeMetadataManager::TransformInlinedData(QueryResult &result,

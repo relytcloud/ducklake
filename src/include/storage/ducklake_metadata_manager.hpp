@@ -197,6 +197,8 @@ public:
 	//! Get the name of the inlined deletion table for a given table ID
 	virtual string GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
 	                                           bool create_if_not_exists = false);
+	//! Check if an inlined deletion table exists in the metadata catalog
+	virtual bool InlinedDeletionTableExists(const string &table_name, DuckLakeSnapshot snapshot);
 	virtual string WriteNewInlinedTables(DuckLakeSnapshot commit_snapshot, const vector<DuckLakeTableInfo> &tables);
 	virtual string GetInlinedTableQueries(DuckLakeSnapshot commit_snapshot, const DuckLakeTableInfo &table,
 	                                      string &inlined_tables, string &inlined_table_queries);
@@ -340,10 +342,9 @@ private:
 	                                                                         DuckLakeSnapshot end_snapshot);
 
 	unordered_map<idx_t, string> insert_inlined_table_name_cache;
-
-protected:
 	unordered_set<idx_t> delete_inlined_table_cache;
 
+protected:
 	DuckLakeTransaction &transaction;
 	mutex paths_lock;
 	map<SchemaIndex, string> schema_paths;
