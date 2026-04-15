@@ -15,6 +15,7 @@
 #include "duckdb/common/reference_map.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "common/ducklake_snapshot.hpp"
+#include "storage/ducklake_catalog.hpp"
 #include "storage/ducklake_partition_data.hpp"
 #include "storage/ducklake_stats.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -121,13 +122,26 @@ public:
 
 	DuckLakeMetadataManager &Get(DuckLakeTransaction &transaction);
 
+	virtual bool IsInitialized(DuckLakeOptions &options);
 	//! Initialize a new DuckLake
 	virtual void InitializeDuckLake(bool has_explicit_schema, DuckLakeEncryption encryption);
 	virtual DuckLakeMetadata LoadDuckLake();
 
-	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string &query);
+	static void FillSnapshotArgs(string &query, const DuckLakeSnapshot &snapshot);
+	static void FillSnapshotCommitArgs(string &query, const DuckLakeSnapshotCommit &commit_info);
+	static void FillCatalogArgs(string &query, const DuckLakeCatalog &ducklake_catalog);
 
-	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string &query);
+	//! Execute on metadata (no snapshot replacement)
+	virtual unique_ptr<QueryResult> Execute(string query);
+	//! Execute on metadata with snapshot replacement
+	virtual unique_ptr<QueryResult> Execute(DuckLakeSnapshot snapshot, string query);
+	//! Execute the metadata commit batch — may be overridden to add retry/conflict handling
+	virtual unique_ptr<QueryResult> ExecuteCommit(DuckLakeSnapshot snapshot, string query);
+
+	//! Query metadata (no snapshot replacement)
+	virtual unique_ptr<QueryResult> Query(string query);
+	//! Query metadata with snapshot replacement
+	virtual unique_ptr<QueryResult> Query(DuckLakeSnapshot snapshot, string query);
 	//! Get the catalog information for a specific snapshot
 	virtual DuckLakeCatalogInfo GetCatalogForSnapshot(DuckLakeSnapshot snapshot);
 	virtual vector<DuckLakeGlobalStatsInfo> GetGlobalTableStats(DuckLakeSnapshot snapshot);
@@ -149,6 +163,7 @@ public:
 	virtual idx_t GetNetDataFileRowCount(TableIndex table_id, DuckLakeSnapshot snapshot);
 	virtual idx_t GetNetInlinedRowCount(const string &inlined_table_name, DuckLakeSnapshot snapshot);
 	virtual vector<DuckLakeFileForCleanup> GetOldFilesForCleanup(const string &filter);
+	virtual unordered_set<string> GetActiveFiles(const string &separator);
 	virtual vector<DuckLakeFileForCleanup> GetOrphanFilesForCleanup(const string &filter, const string &separator);
 	virtual vector<DuckLakeFileForCleanup> GetFilesForCleanup(const string &filter, CleanupType type,
 	                                                          const string &separator);
@@ -183,6 +198,8 @@ public:
 	//! Get the name of the inlined deletion table for a given table ID
 	virtual string GetInlinedDeletionTableName(TableIndex table_id, DuckLakeSnapshot snapshot,
 	                                           bool create_if_not_exists = false);
+	//! Check if an inlined deletion table exists in the metadata catalog
+	virtual bool InlinedDeletionTableExists(const string &table_name, DuckLakeSnapshot snapshot);
 	virtual string WriteNewInlinedTables(DuckLakeSnapshot commit_snapshot, const vector<DuckLakeTableInfo> &tables);
 	virtual string GetInlinedTableQueries(DuckLakeSnapshot commit_snapshot, const DuckLakeTableInfo &table,
 	                                      string &inlined_tables, string &inlined_table_queries);
@@ -205,7 +222,7 @@ public:
 	virtual string UpdateGlobalTableStats(const DuckLakeGlobalStatsInfo &stats);
 	virtual SnapshotChangeInfo GetSnapshotAndStatsAndChanges(DuckLakeSnapshot start_snapshot,
 	                                                         SnapshotAndStats &current_snapshot);
-	SnapshotDeletedFromFiles GetFilesDeletedOrDroppedAfterSnapshot(const DuckLakeSnapshot &start_snapshot) const;
+	SnapshotDeletedFromFiles GetFilesDeletedOrDroppedAfterSnapshot(const DuckLakeSnapshot &start_snapshot);
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot();
 	virtual unique_ptr<DuckLakeSnapshot> GetSnapshot(BoundAtClause &at_clause, SnapshotBound bound);
 	virtual idx_t GetNextColumnId(TableIndex table_id);

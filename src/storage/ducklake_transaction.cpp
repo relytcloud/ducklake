@@ -13,6 +13,7 @@
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
 #include "storage/ducklake_catalog.hpp"
+#include "storage/ducklake_metadata_manager.hpp"
 #include "storage/ducklake_macro_entry.hpp"
 #include "storage/ducklake_schema_entry.hpp"
 #include "storage/ducklake_table_entry.hpp"
@@ -466,6 +467,17 @@ bool LocalTableChanges::HasAnyLocalChanges(TableIndex table_id) const {
 		return true;
 	}
 	return false;
+}
+
+bool LocalTableChanges::HasLocalDeleteForFile(TableIndex table_id, const string &path) const {
+	lock_guard<mutex> guard(lock);
+	auto entry = changes.find(table_id);
+	if (entry == changes.end()) {
+		return false;
+	}
+	auto &table_changes = entry->second;
+	auto file_entry = table_changes.new_delete_files.find(path);
+	return file_entry != table_changes.new_delete_files.end() && !file_entry->second.empty();
 }
 
 void LocalTableChanges::GetLocalDeleteForFile(TableIndex table_id, const string &path, DuckLakeFileData &result) const {
@@ -2469,11 +2481,14 @@ void DuckLakeTransaction::FlushChanges() {
 			batch_queries += CommitChanges(commit_state, transaction_changes, stats);
 
 			batch_queries += WriteSnapshotChanges(commit_state, transaction_changes);
-			auto res = metadata_manager->Execute(commit_snapshot, batch_queries);
+
+			auto res = metadata_manager->ExecuteCommit(commit_snapshot, batch_queries);
 			if (res->HasError()) {
 				res->GetErrorObject().Throw("Failed to flush changes into DuckLake: ");
 			}
-			connection->Commit();
+			if (connection) {
+				connection->Commit();
+			}
 			catalog_version = commit_snapshot.schema_version;
 
 			// finished writing
@@ -2481,9 +2496,10 @@ void DuckLakeTransaction::FlushChanges() {
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			// rollback if there is an active transaction
-			auto has_active_transaction = connection->context->transaction.HasActiveTransaction();
-			if (has_active_transaction) {
-				connection->Rollback();
+			if (connection) {
+				if (connection->context->transaction.HasActiveTransaction()) {
+					connection->Rollback();
+				}
 			}
 			bool retry_on_error = RetryOnError(error.Message());
 			bool finished_retrying = i + 1 >= max_retry_count;
@@ -2514,7 +2530,9 @@ void DuckLakeTransaction::FlushChanges() {
 			// retry the transaction (with a new snapshot id)
 			// clear the inlined table caches - the rollback undid any table creation from the previous attempt
 			metadata_manager->ClearInlinedTableCaches();
-			connection->BeginTransaction();
+			if (connection) {
+				connection->BeginTransaction();
+			}
 			snapshot.reset();
 		}
 	}
@@ -2545,34 +2563,8 @@ void DuckLakeTransaction::DeleteInlinedData(const DuckLakeInlinedTableInfo &inli
 
 unique_ptr<QueryResult> DuckLakeTransaction::Query(string query) {
 	auto &connection = GetConnection();
-	auto catalog_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataDatabaseName());
-	auto catalog_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataDatabaseName());
-	auto schema_identifier = DuckLakeUtil::SQLIdentifierToString(ducklake_catalog.MetadataSchemaName());
-	auto schema_identifier_escaped = StringUtil::Replace(schema_identifier, "'", "''");
-	auto schema_literal = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataSchemaName());
-	auto metadata_path = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.MetadataPath());
-	auto data_path = DuckLakeUtil::SQLLiteralToString(ducklake_catalog.DataPath());
-
-	query = StringUtil::Replace(query, "{METADATA_CATALOG_NAME_LITERAL}", catalog_literal);
-	query = StringUtil::Replace(query, "{METADATA_CATALOG_NAME_IDENTIFIER}", catalog_identifier);
-	query = StringUtil::Replace(query, "{METADATA_SCHEMA_NAME_LITERAL}", schema_literal);
-	query = StringUtil::Replace(query, "{METADATA_CATALOG}", catalog_identifier + "." + schema_identifier);
-	query = StringUtil::Replace(query, "{METADATA_SCHEMA_ESCAPED}", schema_identifier_escaped);
-	query = StringUtil::Replace(query, "{METADATA_PATH}", metadata_path);
-	query = StringUtil::Replace(query, "{DATA_PATH}", data_path);
+	DuckLakeMetadataManager::FillCatalogArgs(query, ducklake_catalog);
 	return connection.Query(query);
-}
-
-unique_ptr<QueryResult> DuckLakeTransaction::Query(DuckLakeSnapshot snapshot, string query) {
-	query = StringUtil::Replace(query, "{SNAPSHOT_ID}", to_string(snapshot.snapshot_id));
-	query = StringUtil::Replace(query, "{SCHEMA_VERSION}", to_string(snapshot.schema_version));
-	query = StringUtil::Replace(query, "{NEXT_CATALOG_ID}", to_string(snapshot.next_catalog_id));
-	query = StringUtil::Replace(query, "{NEXT_FILE_ID}", to_string(snapshot.next_file_id));
-	query = StringUtil::Replace(query, "{AUTHOR}", commit_info.author.ToSQLString());
-	query = StringUtil::Replace(query, "{COMMIT_MESSAGE}", commit_info.commit_message.ToSQLString());
-	query = StringUtil::Replace(query, "{COMMIT_EXTRA_INFO}", commit_info.commit_extra_info.ToSQLString());
-
-	return Query(std::move(query));
 }
 
 string DuckLakeTransaction::GetDefaultSchemaName() {
@@ -2722,6 +2714,10 @@ void DuckLakeTransaction::AddCompaction(TableIndex table_id, DuckLakeCompactionE
 
 bool DuckLakeTransaction::HasLocalDeletes(TableIndex table_id) const {
 	return local_changes.HasLocalDeletes(table_id);
+}
+
+bool DuckLakeTransaction::HasLocalDeleteForFile(TableIndex table_id, const string &path) const {
+	return local_changes.HasLocalDeleteForFile(table_id, path);
 }
 
 bool DuckLakeTransaction::HasAnyLocalChanges(TableIndex table_id) const {

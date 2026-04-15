@@ -23,6 +23,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          Value::UBIGINT(100), nullptr, SetScope::GLOBAL);
 	config.AddExtensionOption("ducklake_retry_backoff", "Backoff factor for exponentially increasing retry wait time",
 	                          LogicalType::DOUBLE, Value::DOUBLE(1.5), nullptr, SetScope::GLOBAL);
+	config.AddExtensionOption("ducklake_default_table_path",
+	                          "Default directory path for DuckLake tables. If set, tables will be created under this path",
+	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION);
 	config.AddExtensionOption("ducklake_default_data_inlining_row_limit",
 	                          "Default row limit for data inlining (0 disables inlining)", LogicalType::UBIGINT,
 	                          Value::UBIGINT(10), nullptr, SetScope::GLOBAL);
@@ -83,6 +86,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	DuckLakeSettingsFunction settings;
 	loader.RegisterFunction(settings);
+
+	DuckLakeEnsureInlinedTableFunction ensure_inlined_table;
+	loader.RegisterFunction(ensure_inlined_table);
 
 	// Register ducklake_scan so it can be found during deserialization
 	auto ducklake_scan = DuckLakeFunctions::GetDuckLakeScanFunction(loader.GetDatabaseInstance());
